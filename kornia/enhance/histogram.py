@@ -2,12 +2,17 @@ import math
 from typing import Optional, Tuple
 
 import torch
+import torch.nn.functional as F
 
 __all__ = ["histogram", "histogram2d", "image_histogram2d"]
 
 
 def marginal_pdf(
-    values: torch.Tensor, bins: torch.Tensor, sigma: torch.Tensor, epsilon: float = 1e-10
+    values: torch.Tensor,
+    bins: torch.Tensor,
+    sigma: torch.Tensor,
+    kernel: str = "gaussian",
+    epsilon: float = 1e-10
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Calculate the marginal probability distribution function of the input tensor based on the number of
     histogram bins.
@@ -43,7 +48,17 @@ def marginal_pdf(
         raise ValueError("Input sigma must be a of the shape 1" " Got {}".format(sigma.shape))
 
     residuals = values - bins.unsqueeze(0).unsqueeze(0)
-    kernel_values = torch.exp(-0.5 * (residuals / sigma).pow(2))
+    if kernel == "gaussian":
+        kernel_values = torch.exp(-0.5 * (residuals / sigma).pow(2))
+    elif kernel == "sigmoid":
+        lower = bins[1] - bins[0]
+        upper = bins[-1] - bins[-2]
+        delta = F.pad(F.pad(torch.diff(bins), (1, 0), value=lower), (0, 1), value=upper)
+        l = torch.sigmoid(sigma * (residuals / delta[:-1] + .5))
+        r = torch.sigmoid(sigma * (residuals / delta[1:] - .5))
+        kernel_values = l - r
+    else:
+        raise ValueError(f"Kernel must be 'gaussian' or 'sigmoid'. Got {kernel}.")
 
     pdf = torch.mean(kernel_values, dim=1)
     normalization = torch.sum(pdf, dim=1).unsqueeze(1) + epsilon
@@ -90,7 +105,11 @@ def joint_pdf(kernel_values1: torch.Tensor, kernel_values2: torch.Tensor, epsilo
     return pdf
 
 
-def histogram(x: torch.Tensor, bins: torch.Tensor, bandwidth: torch.Tensor, epsilon: float = 1e-10) -> torch.Tensor:
+def histogram(x: torch.Tensor,
+              bins: torch.Tensor,
+              bandwidth: torch.Tensor,
+              kernel: str = "gaussian",
+              epsilon: float = 1e-10) -> torch.Tensor:
     """Estimate the histogram of the input tensor.
 
     The calculation uses kernel density estimation which requires a bandwidth (smoothing) parameter.
@@ -112,7 +131,7 @@ def histogram(x: torch.Tensor, bins: torch.Tensor, bandwidth: torch.Tensor, epsi
         torch.Size([1, 128])
     """
 
-    pdf, _ = marginal_pdf(x.unsqueeze(2), bins, bandwidth, epsilon)
+    pdf, _ = marginal_pdf(x.unsqueeze(2), bins, bandwidth, kernel, epsilon)
 
     return pdf
 
@@ -233,7 +252,7 @@ def image_histogram2d(
         mask = (u <= 1).to(u.dtype)
         kernel_values = (1 - u ** 2) * mask
     else:
-        raise ValueError(f"Kernel must be 'triangular', 'gaussian', " f"'uniform' or 'epanechnikov'. Got {kernel}.")
+        raise ValueError(f"Kernel must be 'triangular', 'gaussian', 'uniform' or 'epanechnikov'. Got {kernel}.")
 
     hist = torch.sum(kernel_values, dim=(-2, -1)).permute(1, 2, 0)
     if return_pdf:
